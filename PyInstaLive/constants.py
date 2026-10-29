@@ -60,7 +60,7 @@ proxy =
     USER_INFO = BASE_API + "users/web_profile_info/?username={:s}"
     LIVE_STATE_USER = BASE_API + "live/web_info/?target_user_id={:s}"
     LIVE_HEARTBEAT = BASE_API + "live/{:s}/heartbeat_and_get_viewer_count/"
-    LIVE_COMMENT = BASE_API + "live/{:s}/get_comment/?last_comment_ts={:s}"
+    LIVE_COMMENT = BASE_MOBILE_API + "live/{:s}/get_comment/"
 
     USER_SEARCH = BASE_MOBILE_API + "users/search/"
     USERNAME_INFO_STREAM = BASE_MOBILE_API + "users/{:s}/usernameinfo_stream/"
