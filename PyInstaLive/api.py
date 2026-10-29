@@ -247,17 +247,169 @@ def get_reels_tray():
     return json.loads(response.text)
 
 def get_single_live():
-    response = globals.session.session.get(Constants.LIVE_STATE_USER.format(globals.download.download_user_id), timeout=5)
-    return json.loads(response.text)
+    """Fetch initial live metadata using the same web_info endpoint as the
+    reference Instagram-live-stream-recorder project.
+
+    Fail closed on denied, malformed, or incomplete responses so a single
+    recording attempt does not cascade into further requests with bad IDs.
+    """
+    import logging
+
+    user_id = str(globals.download.download_user_id or "").strip()
+    if not user_id:
+        return {"status": "fail", "message": "Missing target user ID"}
+
+    # Instagram-live-stream-recorder uses i.instagram.com/api/v1/live/web_info
+    # with a session cookie, csrf token and the browser app id.
+    url = "https://i.instagram.com/api/v1/live/web_info/?target_user_id={}".format(user_id)
+    session = globals.session.session
+    try:
+        cookies = session.cookies.get_dict()
+    except Exception:
+        cookies = {}
+    csrf = cookies.get("csrftoken") or ""
+    headers = dict(getattr(Constants, "BASE_HEADERS", {}) or {})
+    headers.update({
+        "Accept": "*/*",
+        "Referer": Constants.BASE_WEB,
+        "X-CSRFToken": csrf,
+        "X-IG-App-ID": "936619743392459",
+        "X-IG-WWW-Claim": "0",
+    })
+    if cookies:
+        headers["Cookie"] = "; ".join("{}={}".format(k, v) for k, v in cookies.items())
+
+    try:
+        response = session.get(url, headers=headers, timeout=8)
+    except Exception as exc:
+        return {"status": "fail", "message": "Live info request failed: {}".format(exc)}
+
+    if response.status_code in (401, 403, 429):
+        body = (getattr(response, "text", "") or "").replace("\\r", " ").replace("\\n", " ").strip()
+        body = body[:240]
+        suffix = ": {}".format(body) if body else ""
+        return {"status": "fail", "message": "Instagram denied live-info request (HTTP {}){}".format(response.status_code, suffix)}
+    if response.status_code != 200:
+        # Short response excerpt helps distinguish session and endpoint errors.
+        # Do not log request cookies or authorization headers.
+        body = (getattr(response, "text", "") or "").replace("\\r", " ").replace("\\n", " ").strip()
+        body = body[:240]
+        suffix = ": {}".format(body) if body else ""
+        return {"status": "fail", "message": "Live-info request returned HTTP {}{}".format(response.status_code, suffix)}
+    try:
+        payload = response.json()
+    except Exception:
+        return {"status": "fail", "message": "Live-info response was not valid JSON"}
+    if not isinstance(payload, dict):
+        return {"status": "fail", "message": "Live-info response had an unexpected format"}
+
+    # Keep Instagram's numeric broadcast id in "id".  "media_id" /
+    # "live_post_id" can be a different media identifier (sometimes a
+    # composite "<media_id>_<owner_id>"). PyInstaLive's comment and heartbeat
+    # endpoints require the numeric broadcast id, not that media identifier.
+    broadcast_id = payload.get("id") or payload.get("strong_id__") or payload.get("str_id")
+    media_id = payload.get("media_id") or payload.get("live_post_id") or broadcast_id
+    mpd_url = payload.get("dash_abr_playback_url")
+    if not broadcast_id or not isinstance(mpd_url, str) or not mpd_url.strip():
+        message = payload.get("message") or payload.get("status") or "Live stream metadata is missing"
+        return {"status": "fail", "message": str(message)}
+
+    normalized = dict(payload)
+    normalized["id"] = str(broadcast_id)
+    if media_id is not None:
+        normalized["media_id"] = str(media_id)
+    normalized.setdefault("broadcast_status", "active")
+    # The web_info payload may not contain broadcast_owner; keep a safe dict so
+    # older PyInstaLive code cannot call .get() on None.
+    owner = normalized.get("broadcast_owner")
+    if not isinstance(owner, dict):
+        normalized["broadcast_owner"] = {"username": globals.download.download_user}
+    if not isinstance(normalized.get("cobroadcasters"), list):
+        normalized["cobroadcasters"] = []
+    return normalized
+
+def _response_json_or_error(response, label):
+    """Parse JSON safely and preserve response details for diagnosis."""
+    try:
+        payload = response.json()
+    except Exception:
+        try:
+            body = (response.text or "").strip().replace("\r", " ").replace("\n", " ")[:240]
+        except Exception:
+            body = ""
+        return {"status": "fail", "message": "{} returned non-JSON response (HTTP {}): {}".format(label, getattr(response, "status_code", "?"), body or "<empty body>")}
+    if not isinstance(payload, dict):
+        return {"status": "fail", "message": "{} returned unexpected JSON type {}".format(label, type(payload).__name__)}
+    if getattr(response, "status_code", 200) >= 400:
+        return {"status": "fail", "message": "{} returned HTTP {}: {}".format(label, response.status_code, str(payload)[:240])}
+    return payload
+
 
 def get_comments():
-    response = globals.session.session.get(Constants.LIVE_COMMENT.format(globals.download.livestream_object_init.get('id'), str(globals.comments.comments_last_ts)), timeout=5)
-    return json.loads(response.text)
+    """Fetch LIVE comments through Instagram's same-origin web endpoint.
+
+    The mobile endpoint currently returns challenge_required/unsupported_version
+    for some otherwise usable web sessions. The Instagram web live page uses
+    /api/v1/live/{broadcast_id}/get_comment/ with the browser session cookies.
+    """
+    try:
+        broadcast_id = globals.download.livestream_object_init.get('id')
+        if not broadcast_id:
+            return {"status": "fail", "message": "Live comments request skipped: broadcast ID is missing"}
+
+        session = globals.session.session
+        try:
+            cookies = session.cookies.get_dict()
+        except Exception:
+            cookies = {}
+        headers = _web_request_headers()
+        username = str(getattr(globals.download, "download_user", "") or "").strip().lstrip("@")
+        referer = Constants.BASE_WEB + (username + "/" if username else "")
+        headers.update({
+            "Referer": referer,
+            "Origin": Constants.BASE_WEB.rstrip("/"),
+            "X-Requested-With": "XMLHttpRequest",
+            "X-ASBD-ID": "359341",
+            "X-IG-App-ID": "936619743392459",
+            "X-CSRFToken": cookies.get("csrftoken", ""),
+            "Accept": "application/json, text/plain, */*",
+        })
+        url = Constants.BASE_API + "live/{}/get_comment/".format(str(broadcast_id))
+        # Keep the cursor used by the original PyInstaLive API and explicitly
+        # request a normal batch of comments, as expected by Instagram's API.
+        params = {
+            "last_comment_ts": str(globals.comments.comments_last_ts),
+            "comment_count": "150",
+            "encoding_tag": "instagram_live_comments",
+        }
+        response = session.get(url, params=params, headers=headers, timeout=8)
+        result = _response_json_or_error(response, "Live comments request")
+        if isinstance(result, dict) and result.get("status") == "fail":
+            # Include the selected endpoint in the log message so an API-side
+            # rejection can be distinguished from a later JSON-save problem.
+            result["message"] = "{} [endpoint=web, broadcast_id={}]".format(
+                result.get("message", "request failed"), str(broadcast_id)
+            )
+        elif isinstance(result, dict):
+            comment_items = result.get("comments")
+            if not isinstance(comment_items, list):
+                return {"status": "fail", "message": "Live comments response has no comments list [endpoint=web, broadcast_id={}]".format(str(broadcast_id))}
+        return result
+    except Exception as exc:
+        return {"status": "fail", "message": "Live comments request failed: {}".format(exc)}
+
 
 def get_stream_data():
-    response = globals.session.session.get(Constants.LIVE_STATE_USER.format(globals.download.download_user_id), timeout=5)
-    return json.loads(response.text)
+    try:
+        response = globals.session.session.get(Constants.LIVE_STATE_USER.format(globals.download.download_user_id), timeout=5)
+        return _response_json_or_error(response, "Live stream-state request")
+    except Exception as exc:
+        return {"status": "fail", "message": "Live stream-state request failed: {}".format(exc)}
+
 
 def do_heartbeat():
-    response = globals.session.session.post(Constants.LIVE_HEARTBEAT.format(globals.download.livestream_object_init.get('id')), timeout=5)
-    return json.loads(response.text)
+    try:
+        response = globals.session.session.post(Constants.LIVE_HEARTBEAT.format(globals.download.livestream_object_init.get('id')), timeout=5)
+        return _response_json_or_error(response, "Live heartbeat request")
+    except Exception as exc:
+        return {"status": "fail", "message": "Live heartbeat request failed: {}".format(exc)}
