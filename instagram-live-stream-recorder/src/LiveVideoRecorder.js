@@ -146,7 +146,13 @@ export default class LiveVideoRecorder extends EventTarget {
     const videoInitUrl = videoSegment.getAttribute('initialization')
     const videoUrl = videoSegment.getAttribute('media')
 
+    this.videoTimescale = Number(videoSegment.getAttribute('timescale')) || 1
     this.firstSegment = +videoSegment.getElementsByTagName('S')[0].getAttribute('t')
+    // Preserve the live-edge position. --get-full later moves firstSegment
+    // backwards while downloading earlier segments; the difference is the
+    // duration prepended to the final MP4.
+    this.firstSegmentAtStart = this.firstSegment
+    this.backfillOffsetSeconds = 0
     
 
     const audioSegment = mpdXml.getElementById('dash-lp-hd-a').getElementsByTagName('SegmentTemplate')[0]
@@ -305,17 +311,50 @@ export default class LiveVideoRecorder extends EventTarget {
       }
       // 変更 end
 
+      // Expand SegmentTimeline repeat entries (r=N). Instagram may publish
+      // one S element for several consecutive media segments. Downloading only
+      // the first timestamp silently drops the repeated segments.
       const parts = []
+      const pendingParts = new Set()
+      let nextTime = null
 
       for (let i = 0; i < timelineParts.length; i++) {
         const part = timelineParts[i]
-        const partNumber = part.getAttribute('t')
-        if (!this.downloadedParts.has(partNumber)) {
-          const duration = part.getAttribute('d')
-          parts.push([partNumber, duration])
-          this.downloadedParts.add(partNumber)
-          this.durations.add(duration)
-        }   
+        const duration = Number(part.getAttribute('d'))
+        const rawTime = part.getAttribute('t')
+        const startTime = rawTime !== null && rawTime !== ''
+          ? Number(rawTime)
+          : nextTime
+
+        if (!Number.isFinite(startTime) || !Number.isFinite(duration) || duration <= 0) {
+          continue
+        }
+
+        const repeatValue = Number(part.getAttribute('r') || 0)
+        let repeat = Number.isFinite(repeatValue) ? repeatValue : 0
+
+        // r=-1 repeats up to the next explicitly-timed S entry. If this is
+        // the final open-ended entry, fetch its current timestamp only; later
+        // MPD refreshes will expose subsequent timestamps.
+        if (repeat < 0) {
+          const nextExplicit = Array.from(timelineParts).slice(i + 1)
+            .map(item => item.getAttribute('t'))
+            .find(value => value !== null && value !== '')
+          if (nextExplicit !== undefined) {
+            repeat = Math.max(0, Math.ceil((Number(nextExplicit) - startTime) / duration) - 1)
+          } else {
+            repeat = 0
+          }
+        }
+
+        for (let j = 0; j <= repeat; j++) {
+          const partNumber = String(startTime + (duration * j))
+          if (!this.downloadedParts.has(partNumber) && !pendingParts.has(partNumber)) {
+            parts.push([partNumber, String(duration)])
+            pendingParts.add(partNumber)
+          }
+        }
+        nextTime = startTime + (duration * (repeat + 1))
       }
 
       if (parts.length === 0) {
@@ -332,16 +371,27 @@ export default class LiveVideoRecorder extends EventTarget {
         }
       }
     
-      for (const [partNumber] of parts) {
+      for (const [partNumber, segmentDuration] of parts) {
         const { ok: videoSegmentOk, blob: curVideoSegment } = await this.requests.downloadVideoSegment(partNumber)
         if (!videoSegmentOk) {
+          verbose && console.warn(`[Video] Segment ${partNumber} download failed; it will be retried on the next MPD refresh.`)
           continue
         }
-            
+
         const { ok: audioSegmentOk, blob: curAudioSegment } = await this.requests.downloadAudioSegment(partNumber)
         if (!audioSegmentOk) {
+          verbose && console.warn(`[Audio] Segment ${partNumber} download failed; it will be retried on the next MPD refresh.`)
           continue
         }
+
+        // Mark a timestamp as complete only after BOTH tracks have arrived.
+        // Previously it was marked before the requests, so one transient
+        // network error permanently discarded that audio/video segment.
+        this.downloadedParts.add(partNumber)
+        // Keep the observed segment duration for --get-full backfilling.
+        // Without this, tryFetchBack() sees an empty duration list and returns
+        // before closing its streams, leaving makeRecords() waiting forever.
+        this.durations.add(Number(segmentDuration))
 
         this.videoStream.write(curVideoSegment)
         this.audioStream.write(curAudioSegment)
@@ -405,9 +455,14 @@ export default class LiveVideoRecorder extends EventTarget {
     const durations = this.durations.getPossibleDurationsList()
     const curSegmentsNumber = this.pastVideoBlobs.length
     if (durations.length === 0) {
+      // Always close both backfill streams, even when there is no duration
+      // information. makeRecords() waits for these streams before muxing.
+      this.pastVideoStream.end()
+      this.pastAudioStream.end()
+      verbose && console.warn('[FetchBack] No segment durations were recorded; skipping backfill and keeping the captured live portion.')
       return {
         status: 'fail',
-        message: 'Possible durations list is empty. Try to record stream first',
+        message: 'Possible durations list is empty. Backfill was skipped.',
       }
     }
     let previousFound = true
@@ -455,6 +510,16 @@ export default class LiveVideoRecorder extends EventTarget {
       }
     }
     verbose && console.log(`FetchBack found ${this.pastVideoBlobs.length - curSegmentsNumber} segments`)
+    // Convert the DASH timeline distance from the original live edge to the
+    // earliest recovered segment into seconds. This is the exact amount of
+    // media prepended to both audio and video in makeRecords().
+    if (Number.isFinite(this.firstSegmentAtStart) && Number.isFinite(this.firstSegment)) {
+      this.backfillOffsetSeconds = Math.max(
+        0,
+        (this.firstSegmentAtStart - this.firstSegment) / (this.videoTimescale || 1)
+      )
+    }
+    verbose && console.log(`[FetchBack] Prepended duration: ${this.backfillOffsetSeconds.toFixed(3)} seconds`)
     this.dispatchEvent(new Event('fetchback-stopped'))
     
     for (const videoBlob of this.pastVideoBlobs.reverse()) {
