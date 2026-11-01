@@ -108,32 +108,31 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
 
 async function collectLiveComments(insta, broadcastId, startedAt, outputFile, intervalMs = 5000, verbose = false, username = '') {
   const comments = []
-  let lastCommentTs = 0
+  // PyInstaLive starts the comments cursor at the recording start epoch,
+  // rather than zero. Instagram can return an empty batch for a zero cursor.
+  let lastCommentTs = Math.floor(startedAt / 1000)
   let stopped = false
-  let blocked = false
   let inFlight = Promise.resolve()
   let timer
-  let consecutiveFailures = 0
+  let polling = false
 
   const poll = async () => {
-    if (stopped || blocked) return
-    const response = await insta.getLiveComments(broadcastId, lastCommentTs, username)
-    if (!response.ok) {
-      const message = String(response.error || 'unknown error')
-      if (response.blocked || /challenge_required|checkpoint_required|login_required|non-json comments response|html page/i.test(message)) {
-        blocked = true
-        console.warn('[Comments] Instagram did not return comment JSON. Comment polling is paused; video recording continues. Check the Instagram login/session in the official app or website before the next recording.')
-      } else {
-        consecutiveFailures += 1
-        const waitSeconds = Math.min(60, Math.max(5, Number(intervalMs) / 1000) * (2 ** Math.min(consecutiveFailures - 1, 4)))
-        if (verbose) console.warn(`[Comments] Temporary request failure (${consecutiveFailures}); retry interval increased to ${waitSeconds}s: ${message}`)
-        nextDelayMs = waitSeconds * 1000
+    if (stopped || polling) return
+    polling = true
+    try {
+      const response = await insta.getLiveComments(broadcastId, lastCommentTs, username)
+      if (!response.ok) {
+        const message = String(response.error || 'unknown error')
+        if (response.challenge || /challenge_required|checkpoint_required|HTML verification\/login page|Non-JSON comments response/i.test(message)) {
+          stopped = true
+          console.warn('[Comments] Instagram returned a verification/HTML page. Comment polling has been paused to avoid repeated requests. Video recording continues; collected comments will be saved.')
+          console.warn('[Comments] After the recording, complete any Instagram verification in your browser and update cookies.txt before the next run.')
+        } else if (verbose) {
+          console.warn(`[Comments] Request failed: ${message}`)
+        }
+        return
       }
-      return
-    }
 
-    consecutiveFailures = 0
-    nextDelayMs = Math.max(2000, Number(intervalMs) || 5000)
     const batch = Array.isArray(response.json?.comments) ? response.json.comments : []
     for (const item of batch) {
       if (!item || typeof item !== 'object') continue
@@ -145,27 +144,26 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
         : Math.max(0, (Date.now() - startedAt) / 1000)
       comments.push({ ...item, total_elapsed: Math.round(elapsed * 1000) / 1000 })
     }
-    if (batch.length && verbose) console.log(`[Comments] ${batch.length} new comment(s), total ${comments.length}`)
+      if (verbose) {
+        if (batch.length) console.log(`[Comments] ${batch.length} new comment(s), total ${comments.length}`)
+        else console.log(`[Comments] Request succeeded (HTTP ${response.status}); no new comments (cursor=${lastCommentTs}).`)
+      }
+    } finally {
+      polling = false
+    }
   }
 
-  let nextDelayMs = Math.max(2000, Number(intervalMs) || 5000)
   await poll()
-  const scheduleNext = () => {
-    if (stopped || blocked) return
-    timer = setTimeout(() => {
-      // Never overlap comment requests. Slow responses must not create a queue
-      // of simultaneous requests while the video segment downloader runs.
-      inFlight = poll()
-        .catch(error => verbose && console.warn(`[Comments] ${error.message}`))
-        .finally(scheduleNext)
-    }, nextDelayMs)
+  if (!stopped) {
+    timer = setInterval(() => {
+      inFlight = poll().catch(error => verbose && console.warn(`[Comments] ${error.message}`))
+    }, Math.max(2000, Number(intervalMs) || 5000))
   }
-  scheduleNext()
 
   return {
     async stop() {
+      clearInterval(timer)
       stopped = true
-      clearTimeout(timer)
       await inFlight
       if (!comments.length) {
         if (verbose) console.log('[Comments] No comments were collected.')
@@ -199,7 +197,12 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
 
       const srtLines = []
       cues.forEach((cue, index) => {
-        srtLines.push(String(index + 1), `${formatSrtTime(cue.elapsed)} --> ${formatSrtTime(cue.elapsed + 5)}`, cue.text, '')
+        srtLines.push(
+          String(index + 1),
+          `${formatSrtTime(cue.elapsed)} --> ${formatSrtTime(cue.elapsed + 5)}`,
+          cue.text,
+          ''
+        )
       })
       await writeFile(srtPath, srtLines.join('\n'), 'utf8')
       console.log(`[Comments] Saved ${comments.length} comment(s): ${jsonPath}`)

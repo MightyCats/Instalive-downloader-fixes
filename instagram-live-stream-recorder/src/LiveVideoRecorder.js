@@ -111,7 +111,8 @@ export default class LiveVideoRecorder extends EventTarget {
     this.startTime = mpdXml.documentElement.getAttribute('firstAvTimeMs')
 
     // const videoSegment = mpdXml.getElementById('dash-lp-pst-v').getElementsByTagName('SegmentTemplate')[0]
-     let videoSegment
+    // 変更 start
+    let videoSegment
     let videoElement = mpdXml.getElementById('dash-lp-hd2-v')
     if (videoElement != null) {
       videoSegment = videoElement.getElementsByTagName('SegmentTemplate')[0]
@@ -140,6 +141,7 @@ export default class LiveVideoRecorder extends EventTarget {
         }
       }
     }
+    // 変更 end
 
     const videoInitUrl = videoSegment.getAttribute('initialization')
     const videoUrl = videoSegment.getAttribute('media')
@@ -271,6 +273,7 @@ export default class LiveVideoRecorder extends EventTarget {
       }
       
       // const timelineParts = mpdXml.getElementById('dash-lp-pst-v').getElementsByTagName('S')
+      // 変更 start
       let timelineParts
       let timelineElement = mpdXml.getElementById('dash-lp-hd2-v')
       if (timelineElement != null) {
@@ -300,6 +303,7 @@ export default class LiveVideoRecorder extends EventTarget {
           }
         }
       }
+      // 変更 end
 
       const parts = []
 
