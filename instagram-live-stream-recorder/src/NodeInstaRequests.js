@@ -3,6 +3,10 @@ import fetch from 'node-fetch'
 export default class NodeInstaRequests {
   constructor({ csrfToken, xmlParser, sessionId, agent, cookieString }) {
     this.cookies = cookieString
+    this.cookieMap = new Map(String(cookieString || '').split(';').map(part => {
+      const index = part.indexOf('=')
+      return index > 0 ? [part.slice(0, index).trim(), part.slice(index + 1).trim()] : ['', '']
+    }).filter(([name]) => name))
     const cookieCsrf = cookieString
       ? (cookieString.match(/(?:^|;\s*)csrftoken=([^;]+)/)?.[1] || '')
       : ''
@@ -13,15 +17,59 @@ export default class NodeInstaRequests {
     this.sessionId = cookieSession || sessionId
     this.xIgWWWClaim = '0'
     this.xmlParser = xmlParser
-    this.xIgAppId = '936619743392459'   // chrome browser
-    this.agent = agent
+    this.xIgAppId = '936619743392459'
+    this.agent = agent // Proxy agent only; never use this as User-Agent.
+    this.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    this._syncCookieFields()
+  }
+
+  _syncCookieFields() {
+    this.cookies = [...this.cookieMap.entries()].map(([name, value]) => `${name}=${value}`).join('; ')
+    this.csrfToken = this.cookieMap.get('csrftoken') || this.csrfToken
+    this.sessionId = this.cookieMap.get('sessionid') || this.sessionId
   }
 
   _handleHeaders(...headers) {
     for (const [header, value] of headers) {
-      if (header === 'x-ig-set-www-claim') {
+      if (String(header).toLowerCase() === 'x-ig-set-www-claim') {
         this.xIgWWWClaim = value
       }
+    }
+  }
+
+  _absorbResponseCookies(response) {
+    // Match requests.Session behavior: retain cookies Instagram legitimately
+    // refreshes during a session, rather than sending a stale startup snapshot.
+    const raw = response?.headers?.raw?.()
+    const setCookies = raw?.['set-cookie'] || []
+    for (const entry of setCookies) {
+      const pair = String(entry).split(';', 1)[0]
+      const index = pair.indexOf('=')
+      if (index <= 0) continue
+      const name = pair.slice(0, index).trim()
+      const value = pair.slice(index + 1).trim()
+      if (name && value) this.cookieMap.set(name, value)
+    }
+    if (setCookies.length) this._syncCookieFields()
+  }
+
+  _webRequestHeaders(username = '') {
+    const cleanUsername = String(username || '').trim().replace(/^@/, '')
+    return {
+      'User-Agent': this.userAgent,
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Sec-CH-UA': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+      'Sec-CH-UA-Mobile': '?0',
+      'Sec-CH-UA-Platform': '"Windows"',
+      'X-IG-App-ID': this.xIgAppId,
+      'X-ASBD-ID': '359341',
+      'X-CSRFToken': this.csrfToken,
+      'X-IG-WWW-Claim': this.xIgWWWClaim,
+      'X-Requested-With': 'XMLHttpRequest',
+      'Cookie': this.cookies || `sessionid=${this.sessionId}; csrftoken=${this.csrfToken};`,
+      'Origin': 'https://www.instagram.com',
+      'Referer': `https://www.instagram.com/${cleanUsername ? cleanUsername + '/' : ''}`
     }
   }
 
@@ -42,7 +90,7 @@ export default class NodeInstaRequests {
       "x-ig-app-id": "936619743392459",
       "x-ig-www-claim": this.xIgWWWClaim,
       "cookie": cookieHeader,
-      "User-Agent": this.agent,
+      "User-Agent": this.userAgent,
       "Referer": "https://www.instagram.com/",
       "Referrer-Policy": "strict-origin-when-cross-origin"
     }
@@ -367,10 +415,11 @@ export default class NodeInstaRequests {
         "sec-fetch-mode": "cors",
         "sec-fetch-site": "same-site",
         "x-asbd-id": "198387",
+        "User-Agent": this.userAgent,
         "x-csrftoken": this.csrfToken,
         "x-ig-app-id": this.xIgAppId,
         "x-ig-www-claim": this.xIgWWWClaim,
-        "cookie": `sessionid=${this.sessionId};`,
+        "cookie": this.cookies || `sessionid=${this.sessionId}; csrftoken=${this.csrfToken};`,
         "Referer": "https://www.instagram.com/",
         "Referrer-Policy": "strict-origin-when-cross-origin"
       },
@@ -385,6 +434,7 @@ export default class NodeInstaRequests {
         }
       }
       this._handleHeaders(...response.headers)
+      this._absorbResponseCookies(response)
       return {
           ok: true,
           status: response.status,
@@ -394,14 +444,10 @@ export default class NodeInstaRequests {
   }
 
 
-  async getLiveComments(broadcastId, lastCommentTs = 0) {
+  async getLiveComments(broadcastId, lastCommentTs = 0, username = '') {
     if (!broadcastId) {
       return { ok: false, status: 0, error: 'Live broadcast ID is missing' }
     }
-
-    const cookieHeader =
-      this.cookies ||
-      `sessionid=${this.sessionId}; csrftoken=${this.csrfToken};`
 
     const params = new URLSearchParams({
       last_comment_ts: String(lastCommentTs || 0),
@@ -413,36 +459,36 @@ export default class NodeInstaRequests {
     try {
       const response = await fetch(url, {
         method: 'GET',
-        headers: {
-          'accept': 'application/json, text/plain, */*',
-          'accept-language': 'en-US,en;q=0.9',
-          'x-asbd-id': '359341',
-          'x-csrftoken': this.csrfToken,
-          'x-ig-app-id': '936619743392459',
-          'x-ig-www-claim': this.xIgWWWClaim,
-          'x-requested-with': 'XMLHttpRequest',
-          'cookie': cookieHeader,
-          'referer': 'https://www.instagram.com/',
-          'origin': 'https://www.instagram.com/'
-        },
-        agent: this.agent
+        headers: this._webRequestHeaders(username),
+        agent: this.agent,
+        timeout: 10000
       })
-
       this._handleHeaders(...response.headers)
+      this._absorbResponseCookies(response)
       const text = await response.text()
       let json
       try {
         json = JSON.parse(text)
       } catch (_) {
-        return { ok: false, status: response.status, error: `Non-JSON comments response: ${text.slice(0, 200)}` }
+        const contentType = response.headers?.get?.('content-type') || ''
+        const isHtml = /text\/html/i.test(contentType) || /^\s*<!doctype html|^\s*<html/i.test(text)
+        const kind = isHtml
+          ? 'Instagram returned an HTML page instead of comment JSON (login/checkpoint/anti-automation page).'
+          : 'Instagram returned a non-JSON comments response.'
+        return { ok: false, status: response.status, blocked: isHtml, error: `${kind} HTTP ${response.status}` }
       }
 
       if (!response.ok || json?.status === 'fail') {
+        const message = json?.message || `Comments request failed: HTTP ${response.status}`
         return {
           ok: false,
           status: response.status,
-          error: json?.message || `Comments request failed: HTTP ${response.status}`
+          blocked: response.status === 401 || response.status === 403 || response.status === 429 || /challenge|checkpoint|login_required/i.test(String(message)),
+          error: message
         }
+      }
+      if (!json || typeof json !== 'object' || !Array.isArray(json.comments)) {
+        return { ok: false, status: response.status, error: 'Comments response JSON did not contain a comments array.' }
       }
       return { ok: true, status: response.status, json }
     } catch (error) {

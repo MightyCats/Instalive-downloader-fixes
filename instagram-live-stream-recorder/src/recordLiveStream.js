@@ -17,8 +17,8 @@ const rnd = Math.floor(Math.random() * 100000)
 
 async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose) {
   const startTime = liveRecorder.startTime
-  const videoTempPath = resolve(dirname, '一時保存', `${startTime}-video-temp-${startTime}_${rnd}.m4v`)
-  const audioTempPath = resolve(dirname, '一時保存', `${startTime}-audio-temp-${startTime}_${rnd}.m4a`)
+  const videoTempPath = resolve(dirname, 'Temp', `${startTime}-video-temp-${startTime}_${rnd}.m4v`)
+  const audioTempPath = resolve(dirname, 'Temp', `${startTime}-audio-temp-${startTime}_${rnd}.m4a`)
   const tempVideoOutput = createWriteStream(videoTempPath)
   const tempAudioOutput = createWriteStream(audioTempPath)
   const initialVideoBuffer = Buffer.from(await liveRecorder.videoInitBlob.arrayBuffer())
@@ -44,8 +44,8 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
     // On user cancellation, do not spend extra time fetching the earlier
     // broadcast. Build a valid partial elementary stream from the init blob
     // plus all segments already downloaded.
-    const videoPath = resolve(dirname, '一時保存', `${startTime}-video-partial-${startTime}_${rnd}.m4v`)
-    const audioPath = resolve(dirname, '一時保存', `${startTime}-audio-partial-${startTime}_${rnd}.m4a`)
+    const videoPath = resolve(dirname, 'Temp', `${startTime}-video-partial-${startTime}_${rnd}.m4v`)
+    const audioPath = resolve(dirname, 'Temp', `${startTime}-audio-partial-${startTime}_${rnd}.m4a`)
     const videoOutput = createWriteStream(videoPath)
     const audioOutput = createWriteStream(audioPath)
     videoOutput.write(initialVideoBuffer)
@@ -66,8 +66,8 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
   }
 
   if (tryToFetchBegining) {
-    const videoPath = resolve(dirname, '一時保存', `${startTime}-video-${startTime}_${rnd}.m4v`)
-    const audioPath = resolve(dirname, '一時保存', `${startTime}-audio-${startTime}_${rnd}.m4a`)
+    const videoPath = resolve(dirname, 'Temp', `${startTime}-video-${startTime}_${rnd}.m4v`)
+    const audioPath = resolve(dirname, 'Temp', `${startTime}-audio-${startTime}_${rnd}.m4a`)
 
     const videoOutput = createWriteStream(videoPath)
     const audioOutput = createWriteStream(audioPath)
@@ -110,23 +110,30 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
   const comments = []
   let lastCommentTs = 0
   let stopped = false
+  let blocked = false
   let inFlight = Promise.resolve()
   let timer
+  let consecutiveFailures = 0
 
   const poll = async () => {
-    if (stopped) return
+    if (stopped || blocked) return
     const response = await insta.getLiveComments(broadcastId, lastCommentTs, username)
     if (!response.ok) {
       const message = String(response.error || 'unknown error')
-      if (/challenge_required|checkpoint_required/i.test(message)) {
-        stopped = true
-        console.warn('[Comments] Instagram security challenge detected; comment polling paused. Video recording continues.')
-      } else if (verbose) {
-        console.warn(`[Comments] Request failed: ${message}`)
+      if (response.blocked || /challenge_required|checkpoint_required|login_required|non-json comments response|html page/i.test(message)) {
+        blocked = true
+        console.warn('[Comments] Instagram did not return comment JSON. Comment polling is paused; video recording continues. Check the Instagram login/session in the official app or website before the next recording.')
+      } else {
+        consecutiveFailures += 1
+        const waitSeconds = Math.min(60, Math.max(5, Number(intervalMs) / 1000) * (2 ** Math.min(consecutiveFailures - 1, 4)))
+        if (verbose) console.warn(`[Comments] Temporary request failure (${consecutiveFailures}); retry interval increased to ${waitSeconds}s: ${message}`)
+        nextDelayMs = waitSeconds * 1000
       }
       return
     }
 
+    consecutiveFailures = 0
+    nextDelayMs = Math.max(2000, Number(intervalMs) || 5000)
     const batch = Array.isArray(response.json?.comments) ? response.json.comments : []
     for (const item of batch) {
       if (!item || typeof item !== 'object') continue
@@ -141,15 +148,24 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
     if (batch.length && verbose) console.log(`[Comments] ${batch.length} new comment(s), total ${comments.length}`)
   }
 
+  let nextDelayMs = Math.max(2000, Number(intervalMs) || 5000)
   await poll()
-  timer = setInterval(() => {
-    inFlight = poll().catch(error => verbose && console.warn(`[Comments] ${error.message}`))
-  }, Math.max(2000, Number(intervalMs) || 5000))
+  const scheduleNext = () => {
+    if (stopped || blocked) return
+    timer = setTimeout(() => {
+      // Never overlap comment requests. Slow responses must not create a queue
+      // of simultaneous requests while the video segment downloader runs.
+      inFlight = poll()
+        .catch(error => verbose && console.warn(`[Comments] ${error.message}`))
+        .finally(scheduleNext)
+    }, nextDelayMs)
+  }
+  scheduleNext()
 
   return {
     async stop() {
-      clearInterval(timer)
       stopped = true
+      clearTimeout(timer)
       await inFlight
       if (!comments.length) {
         if (verbose) console.log('[Comments] No comments were collected.')
@@ -183,12 +199,7 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
 
       const srtLines = []
       cues.forEach((cue, index) => {
-        srtLines.push(
-          String(index + 1),
-          `${formatSrtTime(cue.elapsed)} --> ${formatSrtTime(cue.elapsed + 5)}`,
-          cue.text,
-          ''
-        )
+        srtLines.push(String(index + 1), `${formatSrtTime(cue.elapsed)} --> ${formatSrtTime(cue.elapsed + 5)}`, cue.text, '')
       })
       await writeFile(srtPath, srtLines.join('\n'), 'utf8')
       console.log(`[Comments] Saved ${comments.length} comment(s): ${jsonPath}`)
