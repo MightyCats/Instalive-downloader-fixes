@@ -64,7 +64,7 @@ Example:
   "leaveTemp": false,
   "downloadComments": true,
   "commentInterval": 5000,
-  "cookiesFile": "C:/Instagram/cookies.txt"
+  "cookiesFile": "C:/Program Files/Instagram-live-stream-recorder/www.instagram.com_cookies.txt"
 }
 ```
 
