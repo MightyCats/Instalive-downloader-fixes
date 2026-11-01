@@ -17,8 +17,8 @@ const rnd = Math.floor(Math.random() * 100000)
 
 async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose) {
   const startTime = liveRecorder.startTime
-  const videoTempPath = resolve(dirname, 'Temp保存', `${startTime}-video-temp-${startTime}_${rnd}.m4v`)
-  const audioTempPath = resolve(dirname, 'Temp保存', `${startTime}-audio-temp-${startTime}_${rnd}.m4a`)
+  const videoTempPath = resolve(dirname, 'Temp', `${startTime}-video-temp-${startTime}_${rnd}.m4v`)
+  const audioTempPath = resolve(dirname, 'Temp', `${startTime}-audio-temp-${startTime}_${rnd}.m4a`)
   const tempVideoOutput = createWriteStream(videoTempPath)
   const tempAudioOutput = createWriteStream(audioTempPath)
   const initialVideoBuffer = Buffer.from(await liveRecorder.videoInitBlob.arrayBuffer())
@@ -44,8 +44,8 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
     // On user cancellation, do not spend extra time fetching the earlier
     // broadcast. Build a valid partial elementary stream from the init blob
     // plus all segments already downloaded.
-    const videoPath = resolve(dirname, 'Temp保存', `${startTime}-video-partial-${startTime}_${rnd}.m4v`)
-    const audioPath = resolve(dirname, 'Temp保存', `${startTime}-audio-partial-${startTime}_${rnd}.m4a`)
+    const videoPath = resolve(dirname, 'Temp', `${startTime}-video-partial-${startTime}_${rnd}.m4v`)
+    const audioPath = resolve(dirname, 'Temp', `${startTime}-audio-partial-${startTime}_${rnd}.m4a`)
     const videoOutput = createWriteStream(videoPath)
     const audioOutput = createWriteStream(audioPath)
     videoOutput.write(initialVideoBuffer)
@@ -66,8 +66,8 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
   }
 
   if (tryToFetchBegining) {
-    const videoPath = resolve(dirname, 'Temp保存', `${startTime}-video-${startTime}_${rnd}.m4v`)
-    const audioPath = resolve(dirname, 'Temp保存', `${startTime}-audio-${startTime}_${rnd}.m4a`)
+    const videoPath = resolve(dirname, 'Temp', `${startTime}-video-${startTime}_${rnd}.m4v`)
+    const audioPath = resolve(dirname, 'Temp', `${startTime}-audio-${startTime}_${rnd}.m4a`)
 
     const videoOutput = createWriteStream(videoPath)
     const audioOutput = createWriteStream(audioPath)
