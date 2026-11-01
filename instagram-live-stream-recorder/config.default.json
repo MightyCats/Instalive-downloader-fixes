@@ -1,0 +1,14 @@
+{
+  "proxy": "##proxy string##",
+  "ffmpegOutputOptions": [
+    "-c:v copy",
+    "-c:a aac"
+  ],
+  "verbose": true,
+  "full": true,
+  "getFull": true,
+  "leaveTemp": false,
+  "downloadComments": true,
+  "commentInterval": 5000,
+  "cookiesFile": "C:/Program Files/Instagram-live-stream-recorder/www.instagram.com_cookies.txt"
+}
