@@ -12,7 +12,7 @@ import ffmpeg from 'fluent-ffmpeg'
 import ansiEscapes from 'ansi-escapes'
 
 const dirname = "E:/WORK/INSTAGRAM";
-const editorTempDir = "E:/WORK/INSTAGRAM/一時保存";
+const editorTempDir = "E:/WORK/INSTAGRAM/Temp";
 const rectime = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }).replace(/[/:\s]/g, '-').replace(/,/g, '');
 const outputFileNameTemplate = "{title}@{date}_{time}_";
 const rnd = Math.floor(Math.random() * 100000)
