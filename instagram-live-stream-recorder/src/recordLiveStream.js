@@ -36,15 +36,10 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
   await liveRecorder.startRecording(verbose)
   await finished(videoStream)
   await finished(audioStream)
-  // Wait for the destination files too; a readable stream finishing does
-  // not by itself guarantee that the piped file handles have flushed.
   await finished(tempVideoOutput)
   await finished(tempAudioOutput)
 
   if (tryToFetchBegining && liveRecorder.userCancelled) {
-    // On user cancellation, do not spend extra time fetching the earlier
-    // broadcast. Build a valid partial elementary stream from the init blob
-    // plus all segments already downloaded.
     const videoPath = resolve(tempDir, `${startTime}-video-partial-${startTime}_${rnd}.m4v`)
     const audioPath = resolve(tempDir, `${startTime}-audio-partial-${startTime}_${rnd}.m4a`)
     const videoOutput = createWriteStream(videoPath)
@@ -109,8 +104,6 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
 
 async function collectLiveComments(insta, broadcastId, startedAt, outputFile, intervalMs = 5000, verbose = false, username = '') {
   const comments = []
-  // PyInstaLive starts the comments cursor at the recording start epoch,
-  // rather than zero. Instagram can return an empty batch for a zero cursor.
   let lastCommentTs = Math.floor(startedAt / 1000)
   let stopped = false
   let inFlight = Promise.resolve()
@@ -154,9 +147,6 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
     }
   }
 
-  // Start the first comment request in the background. Waiting for it here
-  // delayed the start of video recording (up to the HTTP timeout) and could
-  // miss the first media segments.
   inFlight = poll().catch(error => verbose && console.warn(`[Comments] ${error.message}`))
   if (!stopped) {
     timer = setInterval(() => {
@@ -231,9 +221,6 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
   }
 }
 
-// Read a Netscape/Mozilla cookies.txt file and build the Cookie header
-// applicable to https://www.instagram.com/. This mirrors PyInstaLive's
-// MozillaCookieJar behavior (including cookies whose expiry has passed).
 async function loadInstagramCookieFile(cookiesFile) {
   if (!cookiesFile) return { cookieString: '', csrfToken: '' }
 
@@ -247,7 +234,6 @@ async function loadInstagramCookieFile(cookiesFile) {
     let line = originalLine.trim()
     if (!line) continue
 
-    // Netscape cookie files encode HttpOnly rows as #HttpOnly_<domain>.
     if (line.startsWith('#HttpOnly_')) {
       line = line.slice('#HttpOnly_'.length)
     } else if (line.startsWith('#')) {
@@ -272,8 +258,6 @@ async function loadInstagramCookieFile(cookiesFile) {
         targetPath !== path) continue
     if (String(secure).toUpperCase() === 'TRUE' && !targetHost) continue
 
-    // Keep expiry semantics aligned with PyInstaLive's
-    // MozillaCookieJar.load(ignore_discard=True, ignore_expires=True).
     selected.set(cookieName, String(value))
   }
 
@@ -300,7 +284,7 @@ export async function recordLiveStream ({
   verbose,
   downloadComments = true,
   commentInterval = 5000,
-  outputDir = "E:/WORK/INSTAGRAM";
+  outputDir = "E:/WORK/INSTAGRAM",
   tempDir = editorTempDir,
   filenameOrder = ['date', 'time', 'username', 'id'],
   filenameSeparator = '_',
