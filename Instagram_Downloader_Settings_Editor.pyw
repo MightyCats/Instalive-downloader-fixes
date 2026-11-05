@@ -50,10 +50,14 @@ def edit_js(p,c):
         s=re.sub(r"const\s+dirname\s*=[^\r\n]*", lambda m: "const dirname = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
         output_var="dirname"
     elif re.search(r"\boutputDir\s*=", s):
-        s=re.sub(r"\boutputDir\s*=[^\r\n]*", lambda m: "outputDir = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
+        # outputDir may be a default parameter inside recordLiveStream({...}); use a comma there, not a semicolon.
+        if re.search(r"export\s+async\s+function\s+recordLiveStream\s*\(\s*\{", s):
+            s=re.sub(r"\boutputDir\s*=[^\r\n]*", lambda m: "outputDir = "+json.dumps(out,ensure_ascii=False)+",", s, count=1)
+        else:
+            s=re.sub(r"\boutputDir\s*=[^\r\n]*", lambda m: "outputDir = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
         output_var="outputDir"
     else:
-        raise ValueError("Could not find output directory variable outputDir / dirname.")
+        raise ValueError("Could not find the output folder variable (outputDir / dirname).")
 
     # Define one temporary directory constant and route temp file creation to it.
     if "const editorTempDir =" in s:
