@@ -5,8 +5,9 @@ from datetime import datetime
 
 SETTINGS=os.path.join(os.path.dirname(os.path.abspath(__file__)),"settings.json")
 TOKENS=["date","username","id","time"]
-LABELS={"date":"Date","username":"Username","id":"Stream ID","time":"Time"}
-DEFAULT={"main":"","comments":"","output":"","temp":"","order":TOKENS[:],"sep":"_","filename_template":"{date}{time}_{username}@{id}","datefmt":"%Y%m%d","timefmt":"%H%M%S","use_date":True,"use_username":True,"use_id":True,"use_time":True,"suffixes":{"date":"","username":"","id":"","time":""},"separators":["","",""]}
+LABELS={"date":"Date","username":"Username","id":"Broadcast ID","time":"Time"}
+DEFAULT={"main":"","comments":"","output":"","temp":"","order":TOKENS[:],"sep":"_","filename_template":"{date}{time}_{username}@{id}","datefmt":"%Y%m%d","timefmt":"%H%M%S","use_date":True,"use_username":True,"use_id":True,"use_time":True,"suffixes":{"date":"","username":"","id":"","time":""},"separators":["","","",""]}
+
 def load():
     try:
         d=json.load(open(SETTINGS,encoding="utf-8"))
@@ -15,19 +16,21 @@ def load():
             for a,b in DEFAULT.items(): d[k].setdefault(a,b)
         return d
     except: return {"js":DEFAULT.copy(),"py":DEFAULT.copy()}
+
 def save(d):
     with open(SETTINGS,"w",encoding="utf-8") as f: json.dump(d,f,ensure_ascii=False,indent=2)
+
 def pattern(c):
     order=c.get("order", TOKENS)
     separators=c.get("separators")
     if not isinstance(separators, list):
         old=c.get("suffixes", {})
-        separators=[old.get(order[i], {"date":"@","username":"_","id":"-"}.get(order[i],"")) for i in range(3)]
+        separators=[old.get(order[i], {"date":"@","username":"_","id":"-"}.get(order[i],"")) for i in range(len(order))]
     parts=[]
     for i,token in enumerate(order):
         if c.get("use_"+token, True):
             parts.append("{"+token+"}")
-            if i < 3 and i < len(separators):
+            if i < len(separators):
                 parts.append(str(separators[i]))
     return "".join(parts) or "{username}"
 
@@ -36,27 +39,29 @@ def backup(p):
 
 def edit_js(p,c):
     s=open(p,encoding="utf-8-sig").read()
-    out=os.path.abspath(c["output"] or os.path.dirname(p))
-    tmp=os.path.abspath(c["temp"] or os.path.join(out,"Temporary"))
-    s=re.sub(r"const dirname = [^\r\n]*","const dirname = "+json.dumps(out,ensure_ascii=False)+";",s,count=1)
+    out=os.path.abspath(c["output"] or os.path.dirname(p)).replace("\\", "/")
+    tmp=os.path.abspath(c["temp"] or os.path.join(out,"temp")).replace("\\", "/")
+    
+    s=re.sub(r"const dirname = [^\r\n]*", lambda m: "const dirname = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
     if "const editorTempDir =" in s:
-        s=re.sub(r"const editorTempDir = .*?;","const editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";",s,count=1)
+        s=re.sub(r"const editorTempDir = .*?;", lambda m: "const editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";", s, count=1)
     else:
-        s=re.sub(r"(const dirname = [^\r\n]*)","\\1\nconst editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";",s,count=1)
-    s=s.replace("resolve(dirname, '一時保存',","resolve(editorTempDir,")
-    s=s.replace("import { rm } from 'fs/promises'","import { rm, mkdir } from 'fs/promises'")
+        s=re.sub(r"(const dirname = [^\r\n]*)", lambda m: m.group(1)+"\nconst editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";", s, count=1)
+    
+    s=s.replace("resolve(dirname, 'temp',", "resolve(editorTempDir,")
+    s=s.replace("import { rm } from 'fs/promises'", "import { rm, mkdir } from 'fs/promises'")
     if "await mkdir(editorTempDir" not in s:
         s=s.replace("  const startTime = liveRecorder.startTime","  await mkdir(editorTempDir, { recursive: true })\n  const startTime = liveRecorder.startTime",1)
     b=s.find("  const outputRecordPath")
     a=s.rfind("  let initStatus",0,b) if b>=0 else -1
-    if a<0 or b<0: raise ValueError("Could not find the filename configuration section in recordLiveStream.js")
+    if a<0 or b<0: raise ValueError("Could not find filename setting block in recordLiveStream.js")
     t=json.dumps(pattern(c),ensure_ascii=False)
     block="\n".join([
       "  let initStatus",
       "  if (mpdUrl) initStatus = await liveRecorder.initializeWithMpdUrl(mpdUrl)",
       "  else if (userId) initStatus = await liveRecorder.initializeWithUserId(userId)",
       "  else if (username) initStatus = await liveRecorder.initializeWithUsername(username)",
-      "  else throw new Error('Please provide mpdUrl, userId, or username')",
+      "  else throw new Error('You need to provide mpdUrl, userId or username')",
       "  const editorNow = new Date()",
       "  const editorPad = n => String(n).padStart(2,'0')",
       "  const editorFmt = (fmt,d) => fmt.replace(/%Y/g,String(d.getFullYear())).replace(/%m/g,editorPad(d.getMonth()+1)).replace(/%d/g,editorPad(d.getDate())).replace(/%H/g,editorPad(d.getHours())).replace(/%M/g,editorPad(d.getMinutes())).replace(/%S/g,editorPad(d.getSeconds()))",
@@ -66,12 +71,13 @@ def edit_js(p,c):
       "  const outputRecordFile = `${editorName}.mp4`"
     ])
     s=s[:a]+block+"\n"+s[b:]
-    s=s.replace("outputFile.replace(/\\.mp4$/i, '.chat.srt')","outputFile.replace(/\\.mp4$/i, '.srt')")
+    s=s.replace("outputFile.replace(/\\.mp4$/i, '.chat.srt')", "outputFile.replace(/\\.mp4$/i, '.srt')")
     open(p,"w",encoding="utf-8",newline="").write(s)
 
 def edit_py(p,c):
     s=open(p,encoding="utf-8-sig").read()
-    out=os.path.abspath(c["output"] or os.path.dirname(p)); tmp=os.path.abspath(c["temp"] or os.path.join(out,"temp"))
+    out=os.path.abspath(c["output"] or os.path.dirname(p))
+    tmp=os.path.abspath(c["temp"] or os.path.join(out,"temp"))
     block="\n".join([
       "# --- settings editor managed block ---",
       "DOWNLOAD_OUTPUT_DIR = "+repr(out),"DOWNLOAD_TEMP_DIR = "+repr(tmp),
@@ -86,11 +92,11 @@ def edit_py(p,c):
         s=re.sub(r"\n# --- settings editor managed block ---.*?(?=\nclass Download:)",block,s,flags=re.S)
     else: s=s.replace("class Download:",block+"\nclass Download:",1)
     a=s.find("            self.video_path = os.path.join")
-    if a<0: raise ValueError("Could not find the video_path configuration section in download.py")
+    if a<0: raise ValueError("Could not find video_path block in download.py")
     pos=s.find("self.data_json_path",a)
     close=s.find("self.timestamp))",pos)
     endline=s.find("\n",close if close>=0 else pos)
-    if endline<0: raise ValueError("Could not find the data_json_path configuration section in download.py")
+    if endline<0: raise ValueError("Could not find data_json_path block in download.py")
     newpaths="\n".join([
       "            self.video_path = os.path.join(DOWNLOAD_OUTPUT_DIR,_editor_filename(self.download_user,self.livestream_object_init.get('id'),self.timestamp,'.mp4'))",
       "            self.segments_path = os.path.join(DOWNLOAD_TEMP_DIR,_editor_filename(self.download_user,self.livestream_object_init.get('id'),self.timestamp,'_segments'))",
@@ -102,7 +108,7 @@ def edit_py(p,c):
 
 class App:
  def __init__(self,r):
-    self.r=r; r.title("Instagram-live-recorder / Pyinstalive Settings Editor"); r.geometry("800x500"); r.resizable(False,False); r.minsize(800,500); r.maxsize(800,500)
+    self.r=r; r.title("Instagram-live-recorder / Pyinstalive Settings Editor"); r.geometry("850x500"); r.resizable(False,False); r.minsize(850,500); r.maxsize(850,500)
     style=ttk.Style(r); style.configure("TNotebook.Tab",font=("Yu Gothic UI",13,"bold")); style.configure("AppTitle.TLabel",font=("Yu Gothic UI",16,"bold")); style.configure("App.TLabel",font=("Yu Gothic UI",10)); style.configure("App.TCheckbutton",font=("Yu Gothic UI",10)); style.configure("App.TButton",font=("Yu Gothic UI",10)); style.configure("App.TEntry",font=("Yu Gothic UI",10)); self.d=load(); self.v={}; self.order_frames={}; self.order_area={}; self.order_vars={}; self.suffix_vars={}; self.separator_vars={}; self.separator_widgets={}; self.preview_funcs={}; self.drag_row={}
     self.nb=ttk.Notebook(r); self.nb.pack(fill="x",expand=False,padx=10,pady=(10,0))
     self.r.bind_all("<B1-Motion>", self.drag_motion_global, add="+")
@@ -111,24 +117,24 @@ class App:
         f=ttk.Frame(self.nb,padding=12); self.nb.add(f,text=label); self.make_tab(k,f)
     bar=ttk.Frame(r); bar.pack(fill="x",padx=10,pady=(2,3))
     ttk.Button(bar,text="Save Settings",command=self.save).pack(side="left")
-    ttk.Button(bar,text="Apply Directly to Script (Create Backup)",command=self.apply).pack(side="right")
+    ttk.Button(bar,text="Apply Directly to Script (Creates Backup)",command=self.apply).pack(side="right")
  def path(self,f,k,label,key,isfile):
     row=ttk.Frame(f); row.pack(fill="x",pady=3); ttk.Label(row,text=label,width=24).pack(side="left"); v=tk.StringVar(value=self.d[k].get(key,"")); self.v[k,key]=v; ttk.Entry(row,textvariable=v).pack(side="left",fill="x",expand=True,padx=4)
     def choose():
-        q=filedialog.askopenfilename(filetypes=[("Script files","*.js;*.py"),("All files","*.*")]) if isfile else filedialog.askdirectory()
+        q=filedialog.askopenfilename(filetypes=[("Script","*.js;*.py"),("All","*.*")]) if isfile else filedialog.askdirectory()
         if q:v.set(q)
     ttk.Button(row,text="Browse",command=choose).pack(side="left")
  def make_tab(self,k,f):
-    script_frame=ttk.LabelFrame(f,text="Script File to Edit",padding=8)
+    script_frame=ttk.LabelFrame(f,text="Target Script File",padding=8)
     script_frame.pack(fill="x",pady=(0,6))
     self.path(script_frame,k,"recordLiveStream.js" if k=="js" else "download.py","main",True)
-    output_frame=ttk.LabelFrame(f,text="Output Folders",padding=8)
+    output_frame=ttk.LabelFrame(f,text="Save Directories",padding=8)
     output_frame.pack(fill="x",pady=(0,6))
-    self.path(output_frame,k,"Download Folder","output",False)
-    self.path(output_frame,k,"Temporary Files Folder","temp",False)
+    self.path(output_frame,k,"Download Output Dir","output",False)
+    self.path(output_frame,k,"Temporary Files Dir","temp",False)
     ttk.Separator(f).pack(fill="x",pady=5)
-    ttk.Label(f,text="Filename Components (Drag to Reorder / Check to Include)",font=("Yu Gothic UI",10,"bold")).pack(anchor="w")
-    ttk.Label(f,text="In each [ ] field, enter the separator to append after that component.").pack(anchor="w",pady=(1,3))
+    ttk.Label(f,text="Filename Format (Drag to reorder / Check to include/exclude)",font=("Yu Gothic UI",10,"bold")).pack(anchor="w")
+    ttk.Label(f,text="Set the separator character that follows each component inside the brackets [ ].").pack(anchor="w",pady=(1,3))
     self.order_frames[k]=[]
     self.order_vars[k]={}
     self.suffix_vars[k]={}
@@ -138,13 +144,13 @@ class App:
     self.order_area[k]=area
     order=self.d[k].get("order",TOKENS[:])
     saved_separators=self.d[k].get("separators")
-    if not isinstance(saved_separators,list) or len(saved_separators)!=3:
+    if not isinstance(saved_separators,list) or len(saved_separators)!=4:
         old_suffixes=self.d[k].get("suffixes",{"date":"","username":"","id":""})
-        saved_separators=[old_suffixes.get(order[i],{"date":"","username":"","id":""}.get(order[i],"")) for i in range(3)]
+        saved_separators=[old_suffixes.get(order[i],{"date":"","username":"","id":""}.get(order[i],"")) for i in range(len(order))]
     for i,token in enumerate(order):
         self.add_order_row(k,token)
-        if i < 3:
-            sep_var=tk.StringVar(value=str(saved_separators[i]))
+        if i < 4:
+            sep_var=tk.StringVar(value=str(saved_separators[i] if i < len(saved_separators) else ""))
             self.separator_vars[k].append(sep_var)
             sep_frame=ttk.Frame(area)
             ttk.Label(sep_frame,text="[").pack(side="left")
@@ -152,7 +158,7 @@ class App:
             ttk.Label(sep_frame,text="]").pack(side="left")
             sep_frame.pack(side="left",anchor="w",padx=(1,3),pady=1)
             self.separator_widgets[k].append(sep_frame)
-    ttk.Label(f,text="Date and Time Formats").pack(anchor="w",pady=(5,1))
+    ttk.Label(f,text="Date & Time Formats").pack(anchor="w",pady=(5,1))
     row=ttk.Frame(f);row.pack(fill="x",pady=1)
     for label,key,default in [("Date Format","datefmt","%Y%m%d"),("Time Format","timefmt","%H%M%S")]:
         ttk.Label(row,text=label).pack(side="left",padx=(2,4))
@@ -171,10 +177,10 @@ class App:
         try:
             date=datetime(2026,11,3,18,22,0).strftime(c["datefmt"])
             time=datetime(2026,11,3,18,22,0).strftime(c["timefmt"])
-            sample=pattern(c).format(date=date,time=time,username="sample@user",id="123456789")
-            preview.config(text="Filename Preview: "+sample+".mp4")
+            sample=pattern(c).format(date=date,time=time,username="sample_user",id="123456789")
+            preview.config(text="Preview: "+sample+".mp4")
         except Exception:
-            preview.config(text="Preview: Check the date/time formats and filename components.")
+            preview.config(text="Preview: Please check the date/time format or filename components.")
     self.preview_funcs[k]=update_preview
     for token in TOKENS:
         self.order_vars[k][token].trace_add("write",update_preview)
@@ -225,7 +231,7 @@ class App:
                 widget.pack_forget()
             for i,item in enumerate(self.order_frames[k]):
                 item.pack(side="left",anchor="n",padx=2,pady=1)
-                if i < 3:
+                if i < 4:
                     self.separator_widgets[k][i].pack(side="left",anchor="w",padx=(1,3),pady=1)
             self.preview_funcs[k]()
         moving.configure(relief="ridge")
@@ -246,20 +252,20 @@ class App:
  def save(self):
     try:
         for k in self.d:self.d[k]=self.collect(k)
-        save(self.d);messagebox.showinfo("Save","Settings have been saved.")
-    except Exception as e:messagebox.showerror("Settings Error",str(e))
+        save(self.d);messagebox.showinfo("Save","Settings saved successfully.")
+    except Exception as e:messagebox.showerror("Error",str(e))
  def apply(self):
     k="js" if self.nb.index(self.nb.select())==0 else "py"
     try:c=self.collect(k)
-    except Exception as e:messagebox.showerror("Settings Error",str(e));return
+    except Exception as e:messagebox.showerror("Error",str(e));return
     fields=["main"]
     for x in fields:
-        if not c.get(x) or not os.path.isfile(c[x]):messagebox.showerror("Validation",x+" must be specified.");return
+        if not c.get(x) or not os.path.isfile(c[x]):messagebox.showerror("Validation","Please specify a valid " + x + " path.");return
     try:
         bs=[backup(c[x]) for x in fields]
         if k=="js":edit_js(c["main"],c)
         else:edit_py(c["main"],c)
-        self.d[k]=c;save(self.d);messagebox.showinfo("Apply Complete","The script was edited successfully.\nBackup:\n"+"\n".join(bs)+"\nPlease restart the recording program.")
-    except Exception as e:messagebox.showerror("Apply Error",str(e))
+        self.d[k]=c;save(self.d);messagebox.showinfo("Success","Applied changes directly to the script file.\nBackups created at:\n" + "\n".join(bs) + "\nPlease restart your recorder.")
+    except Exception as e:messagebox.showerror("Error",str(e))
 if __name__=="__main__":
  r=tk.Tk();App(r);r.mainloop()
