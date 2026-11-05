@@ -41,48 +41,69 @@ def edit_js(p,c):
     s=open(p,encoding="utf-8-sig").read()
     out=os.path.abspath(c["output"] or os.path.dirname(p)).replace("\\", "/")
     tmp=os.path.abspath(c["temp"] or os.path.join(out,"temp")).replace("\\", "/")
-    
-    # Support both current outputDir and legacy dirname scripts.
+
+    # Locate and update the output folder variable (supports both script variants).
     if re.search(r"const\s+outputDir\s*=", s):
         s=re.sub(r"const\s+outputDir\s*=[^\r\n]*", lambda m: "const outputDir = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
+        output_var="outputDir"
     elif re.search(r"const\s+dirname\s*=", s):
         s=re.sub(r"const\s+dirname\s*=[^\r\n]*", lambda m: "const dirname = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
+        output_var="dirname"
+    elif re.search(r"\boutputDir\s*=", s):
+        s=re.sub(r"\boutputDir\s*=[^\r\n]*", lambda m: "outputDir = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
+        output_var="outputDir"
     else:
-        raise ValueError("保存先変数 const outputDir / const dirname が見つかりません")
+        raise ValueError("Could not find output directory variable outputDir / dirname.")
+
+    # Define one temporary directory constant and route temp file creation to it.
     if "const editorTempDir =" in s:
-        s=re.sub(r"const editorTempDir = .*?;", lambda m: "const editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";", s, count=1)
+        s=re.sub(r"const editorTempDir\s*=\s*[^;]*;", "const editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";", s, count=1)
     else:
-        s=re.sub(r"(const (?:outputDir|dirname) = [^\r\n]*)", lambda m: m.group(1)+"\nconst editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";", s, count=1)
-    
-    s=s.replace("resolve(dirname, 'temp',", "resolve(editorTempDir,")
+        s=s.replace("const rnd =", "const editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";\nconst rnd =", 1)
     s=s.replace("import { rm } from 'fs/promises'", "import { rm, mkdir } from 'fs/promises'")
-    if "await mkdir(editorTempDir" not in s:
-        s=s.replace("  const startTime = liveRecorder.startTime","  await mkdir(editorTempDir, { recursive: true })\n  const startTime = liveRecorder.startTime",1)
-    b=s.find("  const outputRecordPath")
-    a=s.rfind("  let initStatus",0,b) if b>=0 else -1
-    if a<0 or b<0: raise ValueError("Could not find the filename configuration section in recordLiveStream.js.")
+    if "import { rm, mkdir } from 'fs/promises'" not in s and "import { mkdir" not in s:
+        s=s.replace("import { rm, mkdir } from 'fs/promises'", "import { rm, mkdir } from 'fs/promises'")
+    # Replace the default tempDir argument if present, otherwise use editorTempDir.
+    s=re.sub(r"tempDir\s*=\s*resolve\(outputDir,\s*['\"]temp['\"]\)", "tempDir = editorTempDir", s)
+    s=s.replace("resolve(dirname, 'temp',", "resolve(editorTempDir,")
+    s=s.replace("resolve(outputDir, 'temp',", "resolve(editorTempDir,")
+
+    # Update filename template constant (or add it near rnd).
     t=json.dumps(pattern(c),ensure_ascii=False)
-    # Keep the public template constant synchronized with the editor settings.
     if re.search(r"const\s+outputFileNameTemplate\s*=", s):
         s=re.sub(r"const\s+outputFileNameTemplate\s*=[^\r\n]*", lambda m: "const outputFileNameTemplate = "+t+";", s, count=1)
     else:
         s=s.replace("const rnd =", "const outputFileNameTemplate = "+t+";\nconst rnd =", 1)
+
+    # Replace only the filename/init section, bounded by stable anchors. This avoids
+    # accidentally matching 'let initStatus' inside a verbose event callback.
+    a=s.find("  let initStatus", s.find("const liveRecorder ="))
+    b=s.find("  const outputRecordPath", a)
+    if a<0 or b<0:
+        raise ValueError("Could not locate the recording initialization / filename section.")
     block="\n".join([
       "  let initStatus",
+      "  await mkdir(editorTempDir, { recursive: true })",
+      "  await mkdir("+output_var+", { recursive: true })",
       "  if (mpdUrl) initStatus = await liveRecorder.initializeWithMpdUrl(mpdUrl)",
       "  else if (userId) initStatus = await liveRecorder.initializeWithUserId(userId)",
       "  else if (username) initStatus = await liveRecorder.initializeWithUsername(username)",
       "  else throw new Error('You need to provide mpdUrl, userId or username')",
-      "  const editorNow = new Date()",
+      "  const streamEpoch = Number(liveRecorder.startTime)",
+      "  const filenameDate = Number.isFinite(streamEpoch) && streamEpoch > 1000000000000 ? new Date(streamEpoch) : Number.isFinite(streamEpoch) && streamEpoch > 1000000000 ? new Date(streamEpoch * 1000) : new Date()",
       "  const editorPad = n => String(n).padStart(2,'0')",
       "  const editorFmt = (fmt,d) => fmt.replace(/%Y/g,String(d.getFullYear())).replace(/%m/g,editorPad(d.getMonth()+1)).replace(/%d/g,editorPad(d.getDate())).replace(/%H/g,editorPad(d.getHours())).replace(/%M/g,editorPad(d.getMinutes())).replace(/%S/g,editorPad(d.getSeconds()))",
-      "  const editorDate = editorFmt("+json.dumps(c["datefmt"])+",editorNow)",
-      "  const editorTime = editorFmt("+json.dumps(c["timefmt"])+",editorNow)",
-      "  const editorTitle = "+json.dumps(c.get("title",""),ensure_ascii=False)+".replace(/[<>:/\\\\|?*]/g,'_')",
-      "  const editorName = outputFileNameTemplate.replace(/\\{date\\}/g,editorDate).replace(/\\{time\\}/g,editorTime).replace(/\\{username\\}/g,String(liveRecorder.username||username||userId||'record')).replace(/\\{id\\}/g,String(liveRecorder.broadcastId||liveRecorder.mediaId||liveRecorder.userId||userId||'unknown')).replace(/\\{title\\}/g,editorTitle)",
-      "  const outputRecordFile = `${editorName}.mp4`"
+      "  const editorDate = editorFmt("+json.dumps(c["datefmt"])+",filenameDate)",
+      "  const editorTime = editorFmt("+json.dumps(c["timefmt"])+",filenameDate)",
+      "  const editorSafe = v => String(v || '').replace(/[\\\\/:*?\\\"<>|]/g,'_').trim()",
+      "  const editorTitle = editorSafe("+json.dumps(c.get("title",""),ensure_ascii=False)+")",
+      "  const editorName = outputFileNameTemplate.replace(/\\{date\\}/g,editorDate).replace(/\\{time\\}/g,editorTime).replace(/\\{username\\}/g,editorSafe(liveRecorder.username || username || userId || 'record')).replace(/\\{id\\}/g,editorSafe(liveRecorder.broadcastId || liveRecorder.mediaId || liveRecorder.userId || userId || 'unknown')).replace(/\\{title\\}/g,editorTitle)",
+      "  const outputRecordFile = `${editorName}.mp4`",
     ])
     s=s[:a]+block+"\n"+s[b:]
+    # Ensure output path uses the selected folder variable.
+    s=re.sub(r"const outputRecordPath\s*=\s*outputFile\s*\|\|\s*resolve\([^,]+,\s*outputRecordFile\s*\)",
+             "const outputRecordPath = outputFile || resolve("+output_var+", outputRecordFile)", s, count=1)
     s=s.replace("outputFile.replace(/\\.mp4$/i, '.chat.srt')", "outputFile.replace(/\\.mp4$/i, '.srt')")
     open(p,"w",encoding="utf-8",newline="").write(s)
 
