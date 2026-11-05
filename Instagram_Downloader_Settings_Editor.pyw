@@ -11,12 +11,11 @@ DEFAULT={"main":"","comments":"","output":"","temp":"","order":TOKENS[:],"sep":"
 def load():
     try:
         d=json.load(open(SETTINGS,encoding="utf-8"))
-        d.setdefault("app_icon","")
         for k in ("js","py"):
             d.setdefault(k,DEFAULT.copy())
             for a,b in DEFAULT.items(): d[k].setdefault(a,b)
         return d
-    except: return {"js":DEFAULT.copy(),"py":DEFAULT.copy(),"app_icon":""}
+    except: return {"js":DEFAULT.copy(),"py":DEFAULT.copy()}
 
 def save(d):
     with open(SETTINGS,"w",encoding="utf-8") as f: json.dump(d,f,ensure_ascii=False,indent=2)
@@ -43,11 +42,17 @@ def edit_js(p,c):
     out=os.path.abspath(c["output"] or os.path.dirname(p)).replace("\\", "/")
     tmp=os.path.abspath(c["temp"] or os.path.join(out,"temp")).replace("\\", "/")
     
-    s=re.sub(r"const dirname = [^\r\n]*", lambda m: "const dirname = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
+    # Support both current outputDir and legacy dirname scripts.
+    if re.search(r"const\s+outputDir\s*=", s):
+        s=re.sub(r"const\s+outputDir\s*=[^\r\n]*", lambda m: "const outputDir = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
+    elif re.search(r"const\s+dirname\s*=", s):
+        s=re.sub(r"const\s+dirname\s*=[^\r\n]*", lambda m: "const dirname = "+json.dumps(out,ensure_ascii=False)+";", s, count=1)
+    else:
+        raise ValueError("保存先変数 const outputDir / const dirname が見つかりません")
     if "const editorTempDir =" in s:
         s=re.sub(r"const editorTempDir = .*?;", lambda m: "const editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";", s, count=1)
     else:
-        s=re.sub(r"(const dirname = [^\r\n]*)", lambda m: m.group(1)+"\nconst editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";", s, count=1)
+        s=re.sub(r"(const (?:outputDir|dirname) = [^\r\n]*)", lambda m: m.group(1)+"\nconst editorTempDir = "+json.dumps(tmp,ensure_ascii=False)+";", s, count=1)
     
     s=s.replace("resolve(dirname, 'temp',", "resolve(editorTempDir,")
     s=s.replace("import { rm } from 'fs/promises'", "import { rm, mkdir } from 'fs/promises'")
@@ -57,6 +62,11 @@ def edit_js(p,c):
     a=s.rfind("  let initStatus",0,b) if b>=0 else -1
     if a<0 or b<0: raise ValueError("Could not find the filename configuration section in recordLiveStream.js.")
     t=json.dumps(pattern(c),ensure_ascii=False)
+    # Keep the public template constant synchronized with the editor settings.
+    if re.search(r"const\s+outputFileNameTemplate\s*=", s):
+        s=re.sub(r"const\s+outputFileNameTemplate\s*=[^\r\n]*", lambda m: "const outputFileNameTemplate = "+t+";", s, count=1)
+    else:
+        s=s.replace("const rnd =", "const outputFileNameTemplate = "+t+";\nconst rnd =", 1)
     block="\n".join([
       "  let initStatus",
       "  if (mpdUrl) initStatus = await liveRecorder.initializeWithMpdUrl(mpdUrl)",
@@ -69,7 +79,7 @@ def edit_js(p,c):
       "  const editorDate = editorFmt("+json.dumps(c["datefmt"])+",editorNow)",
       "  const editorTime = editorFmt("+json.dumps(c["timefmt"])+",editorNow)",
       "  const editorTitle = "+json.dumps(c.get("title",""),ensure_ascii=False)+".replace(/[<>:/\\\\|?*]/g,'_')",
-      "  const editorName = "+t+".replace(/\\{date\\}/g,editorDate).replace(/\\{time\\}/g,editorTime).replace(/\\{username\\}/g,String(liveRecorder.username||username||userId||'record')).replace(/\\{id\\}/g,String(liveRecorder.broadcastId||liveRecorder.mediaId||liveRecorder.userId||userId||'unknown')).replace(/\\{title\\}/g,editorTitle)",
+      "  const editorName = outputFileNameTemplate.replace(/\\{date\\}/g,editorDate).replace(/\\{time\\}/g,editorTime).replace(/\\{username\\}/g,String(liveRecorder.username||username||userId||'record')).replace(/\\{id\\}/g,String(liveRecorder.broadcastId||liveRecorder.mediaId||liveRecorder.userId||userId||'unknown')).replace(/\\{title\\}/g,editorTitle)",
       "  const outputRecordFile = `${editorName}.mp4`"
     ])
     s=s[:a]+block+"\n"+s[b:]
@@ -111,16 +121,16 @@ def edit_py(p,c):
 
 class App:
  def __init__(self,r):
-    self.r=r; r.title("Instagram-live-recorder / Pyinstalive Settings Editor"); r.geometry("1050x550"); r.resizable(False,False); r.minsize(850,350); r.maxsize(1050,550)
-    style=ttk.Style(r); style.configure("TNotebook.Tab",font=("Yu Gothic UI",13,"bold")); style.configure("AppTitle.TLabel",font=("Yu Gothic UI",16,"bold")); style.configure("App.TLabel",font=("Yu Gothic UI",10)); style.configure("App.TCheckbutton",font=("Yu Gothic UI",10)); style.configure("App.TButton",font=("Yu Gothic UI",10)); style.configure("App.TEntry",font=("Yu Gothic UI",10)); self.d=load(); self.v={}; self.order_frames={}; self.order_area={}; self.order_vars={}; self.suffix_vars={}; self.separator_vars={}; self.separator_widgets={}; self.preview_funcs={}; self.drag_row={}
-    self.nb=ttk.Notebook(r); self.nb.pack(fill="x",expand=False,padx=10,pady=(10,0))
+    self.r=r; r.title("Instagram Live Recorder / Pyinstalive Settings Editor"); r.geometry("1050x550"); r.resizable(False,False); r.minsize(850,350); r.maxsize(1050,550)
+    style=ttk.Style(r); style.configure("TNotebook.Tab",font=("Segoe UI",13,"bold")); style.configure("AppTitle.TLabel",font=("Segoe UI",16,"bold")); style.configure("App.TLabel",font=("Segoe UI",10)); style.configure("App.TCheckbutton",font=("Segoe UI",10)); style.configure("App.TButton",font=("Segoe UI",10)); style.configure("App.TEntry",font=("Segoe UI",10)); self.d=load(); self.v={}; self.order_frames={}; self.order_area={}; self.order_vars={}; self.suffix_vars={}; self.separator_vars={}; self.separator_widgets={}; self.preview_funcs={}; self.drag_row={}
+    self.nb=ttk.Notebook(r); self.nb.pack(fill="x",expand=False,padx=10,pady=(5,0))
     self.r.bind_all("<B1-Motion>", self.drag_motion_global, add="+")
     self.r.bind_all("<ButtonRelease-1>", self.drag_release_global, add="+")
     for k,label in [("js","Instagram-live-recorder"),("py","Pyinstalive")]:
         f=ttk.Frame(self.nb,padding=12); self.nb.add(f,text=label); self.make_tab(k,f)
     bar=ttk.Frame(r); bar.pack(fill="x",padx=10,pady=(2,3))
     ttk.Button(bar,text="Save Settings",command=self.save).pack(side="left")
-    ttk.Button(bar,text="Apply Directly to Script (Creates Backup)",command=self.apply).pack(side="right")
+    ttk.Button(bar,text="Apply to Script (create backup)",command=self.apply).pack(side="right")
  def path(self,f,k,label,key,isfile):
     row=ttk.Frame(f); row.pack(fill="x",pady=3); ttk.Label(row,text=label,width=24).pack(side="left"); v=tk.StringVar(value=self.d[k].get(key,"")); self.v[k,key]=v; ttk.Entry(row,textvariable=v).pack(side="left",fill="x",expand=True,padx=4)
     def choose():
@@ -179,6 +189,7 @@ class App:
         c["separators"]=[v.get() for v in self.separator_vars[k]]
         c["datefmt"]=self.v[k,"datefmt"].get()
         c["timefmt"]=self.v[k,"timefmt"].get()
+        c["title"]=self.v[k,"title"].get()
         try:
             date=datetime(2026,11,3,18,22,0).strftime(c["datefmt"])
             time=datetime(2026,11,3,18,22,0).strftime(c["timefmt"])
@@ -263,12 +274,10 @@ class App:
         c["title"]=self.v[k,"title"].get()
         c["suffixes"]={token:self.d[k].get("suffixes",{}).get(token,"") for token in TOKENS}
         for token in TOKENS:c["use_"+token]=self.order_vars[k][token].get()
-    c["app_icon"]=self.icon_var.get()
     return c
  def save(self):
     try:
         for k in ("js","py"):self.d[k]=self.collect(k)
-        self.d["app_icon"]=self.icon_var.get()
         save(self.d);messagebox.showinfo("Saved","Settings have been saved.")
     except Exception as e:messagebox.showerror("Settings Error",str(e))
  def apply(self):
@@ -282,7 +291,7 @@ class App:
         bs=[backup(c[x]) for x in fields]
         if k=="js":edit_js(c["main"],c)
         else:edit_py(c["main"],c)
-        self.d[k]=c;self.d["app_icon"]=self.icon_var.get();save(self.d);messagebox.showinfo("Apply Complete","The script has been updated.\nBackup:\n" + "\n".join(bs) + "\nPlease restart the recording program.")
+        self.d[k]=c;save(self.d);messagebox.showinfo("Apply Complete","The script has been updated.\nBackup:\n" + "\n".join(bs) + "\nPlease restart the recording program.")
     except Exception as e:messagebox.showerror("Apply Error",str(e))
 if __name__=="__main__":
  r=tk.Tk();App(r);r.mainloop()
