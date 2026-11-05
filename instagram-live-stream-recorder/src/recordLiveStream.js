@@ -4,21 +4,24 @@ import HttpsProxyAgent from 'https-proxy-agent'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 import LiveVideoRecorder from './LiveVideoRecorder.js'
 import { createWriteStream, createReadStream } from 'fs'
-import { rm } from 'fs/promises'
+import { rm, mkdir } from 'fs/promises'
 import { resolve } from 'path'
 import { finished } from 'node:stream/promises'
 import { writeFile, readFile } from 'node:fs/promises'
 import ffmpeg from 'fluent-ffmpeg'
 import ansiEscapes from 'ansi-escapes'
 
-const dirname = 'E:\\WORK\\INSTAGRAM'
-const rectime = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }).replace(/[/:\s]/g, '-').replace(/,/g, '');
+const outputDir = "E:/WORK/INSTAGRAM";
+const editorTempDir = "E:/WORK/INSTAGRAM/Temp";
+
+const outputFileNameTemplate = "{title}@{username}_{date}";
 const rnd = Math.floor(Math.random() * 100000)
 
 async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose) {
+  await mkdir(editorTempDir, { recursive: true })
   const startTime = liveRecorder.startTime
-  const videoTempPath = resolve(dirname, 'Temp', `${startTime}-video-temp-${startTime}_${rnd}.m4v`)
-  const audioTempPath = resolve(dirname, 'Temp', `${startTime}-audio-temp-${startTime}_${rnd}.m4a`)
+  const videoTempPath = resolve(editorTempDir, `${startTime}-video-temp-${startTime}_${rnd}.m4v`)
+  const audioTempPath = resolve(editorTempDir, `${startTime}-audio-temp-${startTime}_${rnd}.m4a`)
   const tempVideoOutput = createWriteStream(videoTempPath)
   const tempAudioOutput = createWriteStream(audioTempPath)
   const initialVideoBuffer = Buffer.from(await liveRecorder.videoInitBlob.arrayBuffer())
@@ -44,8 +47,8 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
     // On user cancellation, do not spend extra time fetching the earlier
     // broadcast. Build a valid partial elementary stream from the init blob
     // plus all segments already downloaded.
-    const videoPath = resolve(dirname, 'Temp', `${startTime}-video-partial-${startTime}_${rnd}.m4v`)
-    const audioPath = resolve(dirname, 'Temp', `${startTime}-audio-partial-${startTime}_${rnd}.m4a`)
+    const videoPath = resolve(editorTempDir, `${startTime}-video-partial-${startTime}_${rnd}.m4v`)
+    const audioPath = resolve(editorTempDir, `${startTime}-audio-partial-${startTime}_${rnd}.m4a`)
     const videoOutput = createWriteStream(videoPath)
     const audioOutput = createWriteStream(audioPath)
     videoOutput.write(initialVideoBuffer)
@@ -66,8 +69,8 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
   }
 
   if (tryToFetchBegining) {
-    const videoPath = resolve(dirname, 'Temp', `${startTime}-video-${startTime}_${rnd}.m4v`)
-    const audioPath = resolve(dirname, 'Temp', `${startTime}-audio-${startTime}_${rnd}.m4a`)
+    const videoPath = resolve(editorTempDir, `${startTime}-video-${startTime}_${rnd}.m4v`)
+    const audioPath = resolve(editorTempDir, `${startTime}-audio-${startTime}_${rnd}.m4a`)
 
     const videoOutput = createWriteStream(videoPath)
     const audioOutput = createWriteStream(audioPath)
@@ -108,8 +111,6 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
 
 async function collectLiveComments(insta, broadcastId, startedAt, outputFile, intervalMs = 5000, verbose = false, username = '') {
   const comments = []
-  // PyInstaLive starts the comments cursor at the recording start epoch,
-  // rather than zero. Instagram can return an empty batch for a zero cursor.
   let lastCommentTs = Math.floor(startedAt / 1000)
   let stopped = false
   let inFlight = Promise.resolve()
@@ -189,7 +190,7 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
       }
 
       const jsonPath = outputFile.replace(/\.mp4$/i, '.json')
-      const srtPath = outputFile.replace(/\.mp4$/i, '.chat.srt')
+      const srtPath = outputFile.replace(/\.mp4$/i, '.srt')
       await writeFile(jsonPath, JSON.stringify({ comments }, null, 2), 'utf8')
 
       const formatSrtTime = (seconds) => {
@@ -230,9 +231,6 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
   }
 }
 
-// Read a Netscape/Mozilla cookies.txt file and build the Cookie header
-// applicable to https://www.instagram.com/. This mirrors PyInstaLive's
-// MozillaCookieJar behavior (including cookies whose expiry has passed).
 async function loadInstagramCookieFile(cookiesFile) {
   if (!cookiesFile) return { cookieString: '', csrfToken: '' }
 
@@ -271,8 +269,6 @@ async function loadInstagramCookieFile(cookiesFile) {
         targetPath !== path) continue
     if (String(secure).toUpperCase() === 'TRUE' && !targetHost) continue
 
-    // Keep expiry semantics aligned with PyInstaLive's
-    // MozillaCookieJar.load(ignore_discard=True, ignore_expires=True).
     selected.set(cookieName, String(value))
   }
 
@@ -348,27 +344,28 @@ export async function recordLiveStream ({
       console.log(`Segment ${e.details.segmentNumber} downloaded`)
     })
   }
-  let initStatus
- 
-  let outputRecordFile
-  if (mpdUrl) {
-    initStatus = await liveRecorder.initializeWithMpdUrl(mpdUrl)
-    outputRecordFile = `Instalive@${username  || userId || 'record_'}${rectime}.mp4`    
-  } else if (userId) {
-    initStatus = await liveRecorder.initializeWithUserId(userId) 
-    outputRecordFile = `Instalive@${username || userId}_${rectime}.mp4`    
-  } else if (username) {
-    initStatus = await liveRecorder.initializeWithUsername(username)
-    outputRecordFile = `Instalive@${username}_${rectime}.mp4`
-  } else {
-    throw new Error('You need to provide mpdUrl, userId or username')
-  }
-  const outputRecordPath = outputFile || resolve(dirname, outputRecordFile )
+  let initSt  let initStatus
+  if (mpdUrl) initStatus = await liveRecorder.initializeWithMpdUrl(mpdUrl)
+  else if (userId) initStatus = await liveRecorder.initializeWithUserId(userId)
+  else if (username) initStatus = await liveRecorder.initializeWithUsername(username)
+  else throw new Error('You need to provide mpdUrl, userId or username')
+  const editorNow = new Date()
+  const editorPad = n => String(n).padStart(2,'0')
+  const editorFmt = (fmt,d) => fmt.replace(/%Y/g,String(d.getFullYear())).replace(/%m/g,editorPad(d.getMonth()+1)).replace(/%d/g,editorPad(d.getDate())).replace(/%H/g,editorPad(d.getHours())).replace(/%M/g,editorPad(d.getMinutes())).replace(/%S/g,editorPad(d.getSeconds()))
+  const editorDate = editorFmt("%Y%m%d",editorNow)
+  const editorTime = editorFmt("%H%M%S",editorNow)
+  const editorTitle = "Instalive".replace(/[<>:/\\|?*]/g,'_')
+  const editorName = outputFileNameTemplate.replace(/\{date\}/g,editorDate).replace(/\{time\}/g,editorTime).replace(/\{username\}/g,String(liveRecorder.username||username||userId||'record')).replace(/\{id\}/g,String(liveRecorder.broadcastId||liveRecorder.mediaId||liveRecorder.userId||userId||'unknown')).replace(/\{title\}/g,editorTitle)
+  const outputRecordFile = `${editorName}.mp4`
+utRecordPath = resolve(outputDir, outputRecordFile)
     
 
   if (initStatus.status === 'fail') {
     return { result: initStatus }
   }
+
+  await mkdir(outputDir, { recursive: true })
+  await mkdir(editorTempDir, { recursive: true })
 
   const commentBroadcastId = liveRecorder.broadcastId || liveRecorder.mediaId
   const commentCollector = (downloadComments && commentBroadcastId)
@@ -393,6 +390,15 @@ export async function recordLiveStream ({
   // At that point the exact prepended media duration is known and can be
   // added to every comment timestamp.
   liveRecorder.addEventListener('stream-is-over', () => {
+    commentCollector?.pause().catch((error) => {
+      console.error(`[Comments] Could not pause comment polling: ${error.message}`)
+    })
+  }, { once: true })
+
+  // A manual Ctrl+C stop must also stop comment polling cleanly. The
+  // collected comments remain in memory and are written after media streams
+  // have flushed, so the final JSON/SRT includes the last completed poll.
+  liveRecorder.addEventListener('stopped-by-user', () => {
     commentCollector?.pause().catch((error) => {
       console.error(`[Comments] Could not pause comment polling: ${error.message}`)
     })
