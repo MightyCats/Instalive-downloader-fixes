@@ -11,10 +11,10 @@ import { writeFile, readFile } from 'node:fs/promises'
 import ffmpeg from 'fluent-ffmpeg'
 import ansiEscapes from 'ansi-escapes'
 
-const outputDir = "E:/WORK/INSTAGRAM";
-const editorTempDir = "E:/WORK/INSTAGRAM/Temp";
-
-const outputFileNameTemplate = "{title}@{username}_{date}";
+const dirname = "E:/WORK/INSTAGRAM";
+const editorTempDir = "E:/WORK/INSTAGRAM/一時保存";
+const rectime = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }).replace(/[/:\s]/g, '-').replace(/,/g, '');
+const outputFileNameTemplate = "{title}@{date}_{time}_";
 const rnd = Math.floor(Math.random() * 100000)
 
 async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose) {
@@ -35,18 +35,13 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
   videoStream.pipe(tempVideoOutput)
   audioStream.pipe(tempAudioOutput)
  
-  await liveRecorder.startRecording(verbose)
+  await liveRecorder.startRecording()
   await finished(videoStream)
   await finished(audioStream)
-  // Wait for the destination files too; a readable stream finishing does
-  // not by itself guarantee that the piped file handles have flushed.
   await finished(tempVideoOutput)
   await finished(tempAudioOutput)
 
   if (tryToFetchBegining && liveRecorder.userCancelled) {
-    // On user cancellation, do not spend extra time fetching the earlier
-    // broadcast. Build a valid partial elementary stream from the init blob
-    // plus all segments already downloaded.
     const videoPath = resolve(editorTempDir, `${startTime}-video-partial-${startTime}_${rnd}.m4v`)
     const audioPath = resolve(editorTempDir, `${startTime}-audio-partial-${startTime}_${rnd}.m4a`)
     const videoOutput = createWriteStream(videoPath)
@@ -111,29 +106,32 @@ async function makeRecords (liveRecorder, tryToFetchBegining, leaveTemp, verbose
 
 async function collectLiveComments(insta, broadcastId, startedAt, outputFile, intervalMs = 5000, verbose = false, username = '') {
   const comments = []
-  let lastCommentTs = Math.floor(startedAt / 1000)
+  let lastCommentTs = 0
   let stopped = false
+  let blocked = false
   let inFlight = Promise.resolve()
   let timer
-  let polling = false
+  let consecutiveFailures = 0
 
   const poll = async () => {
-    if (stopped || polling) return
-    polling = true
-    try {
-      const response = await insta.getLiveComments(broadcastId, lastCommentTs, username)
-      if (!response.ok) {
-        const message = String(response.error || 'unknown error')
-        if (response.challenge || /challenge_required|checkpoint_required|HTML verification\/login page|Non-JSON comments response/i.test(message)) {
-          stopped = true
-          console.warn('[Comments] Instagram returned a verification/HTML page. Comment polling has been paused to avoid repeated requests. Video recording continues; collected comments will be saved.')
-          console.warn('[Comments] After the recording, complete any Instagram verification in your browser and update cookies.txt before the next run.')
-        } else if (verbose) {
-          console.warn(`[Comments] Request failed: ${message}`)
-        }
-        return
+    if (stopped || blocked) return
+    const response = await insta.getLiveComments(broadcastId, lastCommentTs, username)
+    if (!response.ok) {
+      const message = String(response.error || 'unknown error')
+      if (response.blocked || /challenge_required|checkpoint_required|login_required|non-json comments response|html page/i.test(message)) {
+        blocked = true
+        console.warn('[Comments] Instagram did not return comment JSON. Comment polling is paused; video recording continues. Check the Instagram login/session in the official app or website before the next recording.')
+      } else {
+        consecutiveFailures += 1
+        const waitSeconds = Math.min(60, Math.max(5, Number(intervalMs) / 1000) * (2 ** Math.min(consecutiveFailures - 1, 4)))
+        if (verbose) console.warn(`[Comments] Temporary request failure (${consecutiveFailures}); retry interval increased to ${waitSeconds}s: ${message}`)
+        nextDelayMs = waitSeconds * 1000
       }
+      return
+    }
 
+    consecutiveFailures = 0
+    nextDelayMs = Math.max(2000, Number(intervalMs) || 5000)
     const batch = Array.isArray(response.json?.comments) ? response.json.comments : []
     for (const item of batch) {
       if (!item || typeof item !== 'object') continue
@@ -145,48 +143,31 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
         : Math.max(0, (Date.now() - startedAt) / 1000)
       comments.push({ ...item, total_elapsed: Math.round(elapsed * 1000) / 1000 })
     }
-      if (verbose) {
-        if (batch.length) console.log(`[Comments] ${batch.length} new comment(s), total ${comments.length}`)
-        else console.log(`[Comments] Request succeeded (HTTP ${response.status}); no new comments (cursor=${lastCommentTs}).`)
-      }
-    } finally {
-      polling = false
-    }
+    if (batch.length && verbose) console.log(`[Comments] ${batch.length} new comment(s), total ${comments.length}`)
   }
 
-  // Start the first comment request in the background. Waiting for it here
-  // delayed the start of video recording (up to the HTTP timeout) and could
-  // miss the first media segments.
-  inFlight = poll().catch(error => verbose && console.warn(`[Comments] ${error.message}`))
-  if (!stopped) {
-    timer = setInterval(() => {
-      inFlight = poll().catch(error => verbose && console.warn(`[Comments] ${error.message}`))
-    }, Math.max(2000, Number(intervalMs) || 5000))
+  let nextDelayMs = Math.max(2000, Number(intervalMs) || 5000)
+  await poll()
+  const scheduleNext = () => {
+    if (stopped || blocked) return
+    timer = setTimeout(() => {
+      // Never overlap comment requests. Slow responses must not create a queue
+      // of simultaneous requests while the video segment downloader runs.
+      inFlight = poll()
+        .catch(error => verbose && console.warn(`[Comments] ${error.message}`))
+        .finally(scheduleNext)
+    }, nextDelayMs)
   }
+  scheduleNext()
 
   return {
-    async pause() {
-      clearInterval(timer)
+    async stop() {
       stopped = true
+      clearTimeout(timer)
       await inFlight
-    },
-    async stop(backfillOffsetSeconds = 0) {
-      await this.pause()
       if (!comments.length) {
         if (verbose) console.log('[Comments] No comments were collected.')
         return null
-      }
-
-      const offset = Number.isFinite(Number(backfillOffsetSeconds))
-        ? Math.max(0, Number(backfillOffsetSeconds))
-        : 0
-      if (offset > 0) {
-        for (const comment of comments) {
-          comment.total_elapsed = Math.round((Number(comment.total_elapsed || 0) + offset) * 1000) / 1000
-        }
-        if (verbose) {
-          console.log(`[Comments] Applied --get-full backfill offset: +${offset.toFixed(3)} seconds`)
-        }
       }
 
       const jsonPath = outputFile.replace(/\.mp4$/i, '.json')
@@ -206,7 +187,7 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
         let elapsed = Number(c.total_elapsed)
         if (!Number.isFinite(elapsed)) {
           const timestamp = Number(c.created_at_utc || c.timestamp || 0)
-          elapsed = timestamp > 0 ? timestamp - (startedAt / 1000) + offset : offset
+          elapsed = timestamp > 0 ? timestamp - (startedAt / 1000) : 0
         }
         elapsed = Math.max(0, elapsed)
         const author = String(c.user?.username || c.username || c.user?.full_name || 'unknown').trim()
@@ -216,12 +197,7 @@ async function collectLiveComments(insta, broadcastId, startedAt, outputFile, in
 
       const srtLines = []
       cues.forEach((cue, index) => {
-        srtLines.push(
-          String(index + 1),
-          `${formatSrtTime(cue.elapsed)} --> ${formatSrtTime(cue.elapsed + 5)}`,
-          cue.text,
-          ''
-        )
+        srtLines.push(String(index + 1), `${formatSrtTime(cue.elapsed)} --> ${formatSrtTime(cue.elapsed + 5)}`, cue.text, '')
       })
       await writeFile(srtPath, srtLines.join('\n'), 'utf8')
       console.log(`[Comments] Saved ${comments.length} comment(s): ${jsonPath}`)
@@ -341,10 +317,7 @@ export async function recordLiveStream ({
   const saveAndExitSignal = () => liveRecorder.stopRecording()
   if (verbose) {
     liveRecorder.addEventListener('segment-downloaded', (e) => {
-      console.log(`Segment ${e.details.segmentNumber} downloaded`)
-    })
-  }
-  let initSt  let initStatus
+      console.log(`Se  let initStatus
   if (mpdUrl) initStatus = await liveRecorder.initializeWithMpdUrl(mpdUrl)
   else if (userId) initStatus = await liveRecorder.initializeWithUserId(userId)
   else if (username) initStatus = await liveRecorder.initializeWithUsername(username)
@@ -354,18 +327,15 @@ export async function recordLiveStream ({
   const editorFmt = (fmt,d) => fmt.replace(/%Y/g,String(d.getFullYear())).replace(/%m/g,editorPad(d.getMonth()+1)).replace(/%d/g,editorPad(d.getDate())).replace(/%H/g,editorPad(d.getHours())).replace(/%M/g,editorPad(d.getMinutes())).replace(/%S/g,editorPad(d.getSeconds()))
   const editorDate = editorFmt("%Y%m%d",editorNow)
   const editorTime = editorFmt("%H%M%S",editorNow)
-  const editorTitle = "Instalive".replace(/[<>:/\\|?*]/g,'_')
+  const editorTitle = "Inatalive".replace(/[<>:/\\|?*]/g,'_')
   const editorName = outputFileNameTemplate.replace(/\{date\}/g,editorDate).replace(/\{time\}/g,editorTime).replace(/\{username\}/g,String(liveRecorder.username||username||userId||'record')).replace(/\{id\}/g,String(liveRecorder.broadcastId||liveRecorder.mediaId||liveRecorder.userId||userId||'unknown')).replace(/\{title\}/g,editorTitle)
   const outputRecordFile = `${editorName}.mp4`
-utRecordPath = resolve(outputDir, outputRecordFile)
+  const outputRecordPath = outputFile || resolve(dirname, outputRecordFile )
     
 
   if (initStatus.status === 'fail') {
     return { result: initStatus }
   }
-
-  await mkdir(outputDir, { recursive: true })
-  await mkdir(editorTempDir, { recursive: true })
 
   const commentBroadcastId = liveRecorder.broadcastId || liveRecorder.mediaId
   const commentCollector = (downloadComments && commentBroadcastId)
@@ -376,33 +346,13 @@ utRecordPath = resolve(outputDir, outputRecordFile)
   verbose && console.log(`Media id: ${liveRecorder.mediaId}`)
   verbose && console.log(`Comment broadcast id: ${commentBroadcastId || 'unavailable'}`)
   verbose && console.log(`First segment: ${liveRecorder.firstSegment}`)
-  let commentsSavePromise = null
-  const saveComments = (backfillOffsetSeconds = 0) => {
-    if (!commentCollector) return Promise.resolve()
-    if (!commentsSavePromise) {
-      commentsSavePromise = commentCollector.stop(backfillOffsetSeconds)
+  let commentsSaved = false
+  const saveComments = async () => {
+    if (commentCollector && !commentsSaved) {
+      commentsSaved = true
+      await commentCollector.stop()
     }
-    return commentsSavePromise
   }
-
-  // Stop network polling as soon as the live ends, but defer writing the
-  // comment files until --get-full has finished fetching the earlier video.
-  // At that point the exact prepended media duration is known and can be
-  // added to every comment timestamp.
-  liveRecorder.addEventListener('stream-is-over', () => {
-    commentCollector?.pause().catch((error) => {
-      console.error(`[Comments] Could not pause comment polling: ${error.message}`)
-    })
-  }, { once: true })
-
-  // A manual Ctrl+C stop must also stop comment polling cleanly. The
-  // collected comments remain in memory and are written after media streams
-  // have flushed, so the final JSON/SRT includes the last completed poll.
-  liveRecorder.addEventListener('stopped-by-user', () => {
-    commentCollector?.pause().catch((error) => {
-      console.error(`[Comments] Could not pause comment polling: ${error.message}`)
-    })
-  }, { once: true })
 
   const result = makeRecords(liveRecorder, tryToFetchBegining, leaveTemp, verbose)
     .then(async (records) => {
@@ -413,7 +363,7 @@ utRecordPath = resolve(outputDir, outputRecordFile)
 
       // Persist comments as soon as the captured media streams have been
       // closed, before ffmpeg muxing. Thus an ffmpeg error cannot discard them.
-      await saveComments(liveRecorder.backfillOffsetSeconds || 0)
+      await saveComments()
 
       try {
         const merged = await mergeFiles({ ...records, outputFile: outputRecordPath, ffmpegOutputOptions, verbose })
@@ -434,7 +384,7 @@ utRecordPath = resolve(outputDir, outputRecordFile)
       }
     })
     .catch(async (error) => {
-      try { await saveComments(liveRecorder.backfillOffsetSeconds || 0) } catch (saveError) {
+      try { await saveComments() } catch (saveError) {
         console.error(`[Comments] Could not save comments: ${saveError.message}`)
       }
       throw error
